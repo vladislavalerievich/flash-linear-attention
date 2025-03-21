@@ -198,9 +198,7 @@ class GatedDeltaNet(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
-        if self.training:
-            assert mode == 'chunk', "Only chunk mode is supported in training."
+        mode = 'fused_recurrent'
 
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
