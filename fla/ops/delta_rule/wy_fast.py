@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
@@ -8,16 +7,19 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.utils import device_capacity
+
 
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
     ],
-    key=["BK"]
+    key=['H', 'K', 'BT', 'BK', 'BC', 'HEAD_FIRST', 'USE_OFFSETS'],
 )
 @triton.jit(do_not_specialize=['T'])
 def fwd_prepare_wy_repr_kernel_chunk32(
@@ -32,8 +34,8 @@ def fwd_prepare_wy_repr_kernel_chunk32(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BC: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
+    USE_OFFSETS: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -81,10 +83,11 @@ def fwd_prepare_wy_repr_kernel_chunk32(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
     ],
-    key=['BK']
+    key=['H', 'K', 'BT', 'BK', 'BC', 'HEAD_FIRST', 'USE_OFFSETS'],
 )
 @triton.jit(do_not_specialize=['T'])
 def fwd_prepare_wy_repr_kernel_chunk64(
@@ -99,8 +102,8 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BC: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
+    HEAD_FIRST: tl.constexpr,
+    USE_OFFSETS: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -177,10 +180,11 @@ def fwd_prepare_wy_repr_kernel_chunk64(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'BK', 'BV']
+    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'HEAD_FIRST', 'USE_OFFSETS'],
 )
 @triton.jit(do_not_specialize=['T'])
 def fwd_recompute_w_u_kernel(
@@ -199,8 +203,8 @@ def fwd_recompute_w_u_kernel(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
+    HEAD_FIRST: tl.constexpr,
+    USE_OFFSETS: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -250,10 +254,11 @@ def fwd_recompute_w_u_kernel(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'BK', 'BV']
+    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'HEAD_FIRST', 'USE_OFFSETS'],
 )
 @triton.jit(do_not_specialize=['T'])
 def bwd_prepare_wy_repr_kernel(
@@ -275,8 +280,8 @@ def bwd_prepare_wy_repr_kernel(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
+    HEAD_FIRST: tl.constexpr,
+    USE_OFFSETS: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -429,8 +434,9 @@ def fwd_recompute_w_u(
     else:
         B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
-    BK = min(triton.next_power_of_2(K), 64)
-    BV = min(triton.next_power_of_2(V), 64)
+    CONST_TILING = 64 if device_capacity else 32
+    BK = min(triton.next_power_of_2(K), CONST_TILING)
+    BV = min(triton.next_power_of_2(V), CONST_TILING)
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
     u = torch.empty_like(v)
@@ -473,8 +479,9 @@ def bwd_prepare_wy_repr(
     else:
         B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
-    BK = min(triton.next_power_of_2(K), 64)
-    BV = min(triton.next_power_of_2(V), 64)
+    CONST_TILING = 64 if device_capacity else 32
+    BK = min(triton.next_power_of_2(K), CONST_TILING)
+    BV = min(triton.next_power_of_2(V), CONST_TILING)
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
     dk = torch.empty_like(k)
